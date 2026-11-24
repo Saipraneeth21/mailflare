@@ -8,6 +8,7 @@ import { requireUser } from "@/lib/auth/cookies";
 import { hasValidSessionMutationOrigin } from "@/lib/auth/origin";
 import { getSessionTokenFromRequestHeaders } from "@/lib/auth/session";
 import { bumpSecurityVersion } from "@/lib/auth/webauthn/grants";
+import { notifyPreviousRecoveryEmail } from "@/lib/auth/recovery-changed-mail";
 import { authorizeSecurityChange } from "@/lib/auth/webauthn/authorize";
 import { authError } from "@/lib/http/auth-error";
 import { getLicenseEntitlements } from "@/lib/licenses/service";
@@ -53,6 +54,7 @@ export async function PATCH(request: Request) {
 		.set({ resetEmail: parsed.resetEmail, forwardingEmail })
 		.where(eq(users.id, user.id));
 	if (recoveryChanged) await bumpSecurityVersion(db, user.id);
+	await notifyPreviousRecoveryEmail(env, user, parsed.resetEmail);
 
 	return NextResponse.json({
 		user: {

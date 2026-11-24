@@ -7,7 +7,7 @@ import { verifyPassword } from "@/lib/auth/password";
 import { allowLoginAttempt } from "@/lib/auth/rate-limit";
 import { getSessionTokenFromRequestHeaders } from "@/lib/auth/session";
 import { createStepUpGrant, StaleStepUpProofError } from "@/lib/auth/webauthn/grants";
-import { verifySecondFactor } from "@/lib/auth/mfa";
+import { verifyLimitedSecondFactor } from "@/lib/auth/second-factor-attempts";
 import { authError } from "@/lib/http/auth-error";
 
 /** Re-authenticates the current session for one named security change. */
@@ -34,9 +34,9 @@ export async function POST(request: Request) {
 	const actionRequiresCode = auth.user.requireSecondFactor || (action === "mfa.disable" && auth.user.totpEnabled);
 	if (actionRequiresCode) {
 		if (!parsed.data.code) return authError("verification_required", 401);
-		if (!(await verifySecondFactor(env, auth.user, parsed.data.code))) {
-			return authError("code_mismatch", 401);
-		}
+		const outcome = await verifyLimitedSecondFactor(env, auth.user, parsed.data.code, request);
+		if (outcome === "limited") return authError("rate_limited", 429, { "Retry-After": "900" });
+		if (outcome !== "ok") return authError("code_mismatch", 401);
 	}
 	const token = getSessionTokenFromRequestHeaders(request);
 	if (!token) return authError("session_expired", 401);

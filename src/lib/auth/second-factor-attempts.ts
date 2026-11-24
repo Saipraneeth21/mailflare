@@ -3,6 +3,7 @@ import { getDb } from "@/db";
 import { auditLogs } from "@/db/schema";
 import { newId } from "@/lib/ids";
 import { getAuthActivityMetadata } from "./activity";
+import { verifySecondFactor } from "./mfa";
 
 /**
  * Wrong second-factor codes are limited per account, across every IP and login
@@ -16,14 +17,14 @@ const WINDOW_MINUTES = 15;
 const FAILED_ACTION = "auth.second_factor_failed";
 
 /** Returns an attempt id to clear once the code is correct, or null when the account is out of attempts. */
-export async function reserveSecondFactorAttempt(env: CloudflareEnv, userId: string, request: Request): Promise<string | null> {
+export async function reserveSecondFactorAttempt(env: CloudflareEnv, userId: string, request?: Request): Promise<string | null> {
 	const db = getDb(env);
 	const id = newId("aud");
 	await db.insert(auditLogs).values({
 		id,
 		targetUserId: userId,
 		action: FAILED_ACTION,
-		metadata: JSON.stringify(getAuthActivityMetadata(request)),
+		metadata: request ? JSON.stringify(getAuthActivityMetadata(request)) : null,
 	});
 	const since = new Date(Date.now() - WINDOW_MINUTES * 60 * 1000);
 	const [row] = await db
@@ -33,6 +34,20 @@ export async function reserveSecondFactorAttempt(env: CloudflareEnv, userId: str
 	if ((row?.attempts ?? 0) <= MAX_FAILED_ATTEMPTS) return id;
 	await clearSecondFactorAttempt(env, id);
 	return null;
+}
+
+/** Check a code within the account's attempt limit. "limited" means it was not checked at all. */
+export async function verifyLimitedSecondFactor(
+	env: CloudflareEnv,
+	user: Parameters<typeof verifySecondFactor>[1],
+	code: string,
+	request?: Request,
+): Promise<"ok" | "mismatch" | "limited"> {
+	const attempt = await reserveSecondFactorAttempt(env, user.id, request);
+	if (!attempt) return "limited";
+	if (!(await verifySecondFactor(env, user, code))) return "mismatch";
+	await clearSecondFactorAttempt(env, attempt);
+	return "ok";
 }
 
 /** A correct code is not a failed attempt. */

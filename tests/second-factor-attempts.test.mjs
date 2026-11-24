@@ -20,6 +20,10 @@ await build({
 			export { generateTotpSecret, hotp, totpCounter } from "./src/lib/auth/totp.ts";
 			export * as mfaVerify from "./src/app/api/auth/mfa/verify/route.ts";
 			export * as device from "./src/app/api/auth/device/route.ts";
+			export * as stepUp from "./src/app/api/auth/step-up/route.ts";
+			export { authorizeSecurityChange } from "./src/lib/auth/webauthn/authorize.ts";
+			export { createSession } from "./src/lib/auth/session.ts";
+			export { hashPassword } from "./src/lib/auth/password.ts";
 		`,
 		resolveDir: root,
 		sourcefile: "second-factor-attempts-entry.ts",
@@ -34,7 +38,7 @@ await build({
 	alias: { "next/headers": headersStub, "next/server": "next/server.js", "cloudflare:workers": "./server/runtime/cloudflare-workers.ts" },
 	logLevel: "silent",
 });
-const { SqliteDatabase, applyMigrations, createLoginChallenge, generateTotpSecret, hotp, totpCounter, mfaVerify, device } =
+const { SqliteDatabase, applyMigrations, createLoginChallenge, generateTotpSecret, hotp, totpCounter, mfaVerify, device, stepUp, authorizeSecurityChange, createSession, hashPassword } =
 	await import(pathToFileURL(join(directory, "entry.mjs")).href);
 
 // No LOGIN_RATE_LIMIT binding: the per-IP limiter allows everything, as it does for an attacker spread over many IPs.
@@ -59,6 +63,7 @@ async function fixture(t) {
 		body: JSON.stringify(body),
 	});
 	return {
+		post,
 		goodCode,
 		wrongCode,
 		challenge: () => createLoginChallenge(env, "alice"),
@@ -89,4 +94,27 @@ test("parallel guesses cannot outrun the per-account limit", async t => {
 	const checked = statuses.filter((status) => status === 401).length;
 	assert.ok(checked >= 1 && checked <= 5, `${checked} codes were checked`);
 	assert.equal(checked + statuses.filter((status) => status === 429).length, 12);
+});
+
+test("step-up and settings changes share the account's code limit", async (t) => {
+	const { goodCode, wrongCode, post } = await fixture(t);
+	const env = globalThis.__mailflareNodeEnv;
+	const database = globalThis.__mailflareNodeEnv.DB;
+	database.db.prepare("UPDATE users SET password_hash = ? WHERE id = 'alice'").run(hashPassword("correct horse"));
+	const token = await createSession(env, "alice");
+	const ask = (code) => {
+		const request = post("/api/auth/step-up", { action: "mfa.disable", password: "correct horse", code });
+		request.headers.set("authorization", `Bearer ${token}`);
+		return stepUp.POST(request);
+	};
+	const user = database.db.prepare("SELECT id, password_hash AS passwordHash, totp_secret AS totpSecret FROM users WHERE id = 'alice'").get();
+	const change = (code) => authorizeSecurityChange(env, { ...user, requireSecondFactor: true, totpEnabled: true }, token, { password: "correct horse", code }, "mfa.disable");
+	for (let i = 0; i < 3; i++) assert.equal((await ask(wrongCode)).status, 401);
+	for (let i = 0; i < 2; i++) assert.equal(await change(wrongCode), false);
+	// Out of attempts: even the right code is not checked, on either path.
+	assert.equal((await ask(goodCode)).status, 429);
+	assert.equal(await change(goodCode), false);
+	database.db.exec("DELETE FROM audit_logs");
+	assert.equal(await change(goodCode), true);
+	assert.equal(database.db.prepare("SELECT count(*) AS n FROM audit_logs WHERE action = 'auth.second_factor_failed'").get().n, 0);
 });

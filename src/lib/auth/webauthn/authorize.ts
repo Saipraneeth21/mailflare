@@ -1,5 +1,5 @@
 import { verifyPassword } from "@/lib/auth/password";
-import { verifySecondFactor } from "@/lib/auth/mfa";
+import { verifyLimitedSecondFactor } from "@/lib/auth/second-factor-attempts";
 import { consumeStepUpGrant } from "./grants";
 import type { StepUpAction } from "./step-up-types";
 
@@ -31,5 +31,6 @@ export async function authorizeSecurityChange(
 	}
 	if (!input.password || !verifyPassword(input.password, user.passwordHash)) return false;
 	if (!options.requireCode && !user.requireSecondFactor) return true;
-	return !!input.code && !!(await verifySecondFactor(env, user, input.code));
+	// Counted like a login code: a hijacked session with the password must not get unlimited guesses.
+	return !!input.code && (await verifyLimitedSecondFactor(env, user, input.code)) === "ok";
 }

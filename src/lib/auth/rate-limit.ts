@@ -7,7 +7,28 @@ import { getClientIp } from "./client-ip";
  * a client could rotate them to leave the bucket entirely.
  */
 function clientRateLimitKey(request: Request): string {
-	return getClientIp(request) ?? "unknown";
+	return rateLimitNetwork(getClientIp(request) ?? "unknown");
+}
+
+/**
+ * One IPv6 customer usually holds a whole /64, so a limit per full address could be dodged by rotating it.
+ * IPv4 (also in its IPv6-mapped form) and anything unparseable stay as they are.
+ */
+export function rateLimitNetwork(ip: string): string {
+	const address = ip.split("%", 1)[0].toLowerCase();
+	const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address);
+	if (mapped) return mapped[1];
+	if (!/^[0-9a-f:]+(?:\d{1,3}(?:\.\d{1,3}){3})?$/.test(address) || !address.includes(":")) return ip;
+	const halves = address.split("::");
+	if (halves.length > 2) return ip;
+	const groups = (part: string) => (part ? part.split(":") : []).flatMap((group) => (group.includes(".") ? ["0", "0"] : [group]));
+	const head = groups(halves[0]);
+	const tail = halves.length === 2 ? groups(halves[1]) : [];
+	const missing = 8 - head.length - tail.length;
+	if (halves.length === 2 ? missing < 1 : missing !== 0) return ip;
+	const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+	if (all.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return ip;
+	return `${all.slice(0, 4).map((group) => Number.parseInt(group, 16).toString(16)).join(":")}::/64`;
 }
 
 /** Mobile sign-ins have their own, stricter budget (they skip Turnstile). */
